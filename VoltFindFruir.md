@@ -3,13 +3,64 @@ local Players,TweenService,RunService,ReplicatedStorage,Workspace,TeleportServic
 local Player,PlayerGui=Players.LocalPlayer,Players.LocalPlayer:WaitForChild("PlayerGui")
 
 -- ==================== CONFIGURAÇÕES GLOBAIS ====================
-getgenv().VoltFindFruit=getgenv().VoltFindFruit or{StartTime=0,TotalTime=0,ScriptActive=true}
-if getgenv().VoltFindFruit.StartTime==0 then getgenv().VoltFindFruit.StartTime=tick()end
+local HttpService=game:GetService("HttpService")
+local timeFilePath="VoltFindFruit_Time.json"
+
+-- Função para carregar tempo salvo
+local function LoadSavedTime()
+    if isfile and readfile and isfile(timeFilePath)then
+        local success,data=pcall(function()
+            return HttpService:JSONDecode(readfile(timeFilePath))
+        end)
+        if success and data and data.TotalTime then
+            return data.TotalTime
+        end
+    end
+    return 0
+end
+
+-- Função para salvar tempo
+local function SaveTimeToFile(totalTime)
+    if writefile then
+        local data={TotalTime=totalTime,LastSave=os.time()}
+        pcall(function()
+            writefile(timeFilePath,HttpService:JSONEncode(data))
+        end)
+    end
+end
+
+-- Inicializa com tempo salvo
+getgenv().VoltFindFruit=getgenv().VoltFindFruit or{StartTime=tick(),TotalTime=LoadSavedTime(),ScriptActive=true}
 getgenv().ACF,AutoRF,AutoSF=true,true,true
 
 -- ==================== FUNÇÕES AUXILIARES ====================
 local function FormatTime(s)return string.format("%02d:%02d:%02d",math.floor(s/3600),math.floor((s%3600)/60),math.floor(s%60))end
-local function GetTotalActiveTime()return getgenv().VoltFindFruit.TotalTime+(tick()-getgenv().VoltFindFruit.StartTime)end
+local function GetTotalActiveTime()
+    local currentSession=tick()-getgenv().VoltFindFruit.StartTime
+    return getgenv().VoltFindFruit.TotalTime+currentSession
+end
+local function SaveTime()
+    local totalTime=GetTotalActiveTime()
+    getgenv().VoltFindFruit.TotalTime=totalTime
+    getgenv().VoltFindFruit.StartTime=tick()
+    SaveTimeToFile(totalTime)
+end
+
+-- Auto-save a cada 10 segundos
+task.spawn(function()
+    while task.wait(10)do
+        pcall(function()
+            SaveTime()
+        end)
+    end
+end)
+
+-- Salva ao trocar de servidor
+game:GetService("Players").PlayerRemoving:Connect(function(player)
+    if player==Player then
+        SaveTime()
+    end
+end)
 
 -- ==================== NOTIFICAÇÃO ====================
 local function ShowNotification(title,message,duration)
@@ -94,6 +145,46 @@ local function CheckAndHop()
     end
 end
 
+-- ==================== NOCLIP & ANTI-COLISÃO ====================
+local NoClipConnection=nil
+local function EnableNoClip()
+    if NoClipConnection then return end
+    NoClipConnection=RunService.Stepped:Connect(function()
+        pcall(function()
+            if getgenv().ACF then
+                local char=Player.Character
+                if char then
+                    for _,part in pairs(char:GetDescendants())do
+                        if part:IsA("BasePart")then
+                            part.CanCollide=false
+                        end
+                    end
+                end
+            end
+        end)
+    end)
+end
+
+local function DisableNoClip()
+    if NoClipConnection then
+        NoClipConnection:Disconnect()
+        NoClipConnection=nil
+    end
+    pcall(function()
+        local char=Player.Character
+        if char then
+            for _,part in pairs(char:GetDescendants())do
+                if part:IsA("BasePart")and part.Name~="HumanoidRootPart"then
+                    part.CanCollide=true
+                end
+            end
+        end
+    end)
+end
+
+-- Ativa NoClip automaticamente
+EnableNoClip()
+
 -- ==================== AUTO FARM FRUITS ====================
 local CF=ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("CommF_")
 task.spawn(function()while task.wait(0.25)do pcall(function()if AutoRF and CF then CF:InvokeServer("Cousin","Buy")end end)end end)
@@ -117,15 +208,27 @@ end
 task.spawn(function()
     while task.wait(0.3)do
         pcall(function()
-            if not getgenv().ACF then StopTween()isCollecting=false return end
+            if not getgenv().ACF then StopTween()isCollecting=false DisableNoClip()return end
             if isCollecting then return end
             if not AnyFruitInServer()then StopTween()isCollecting=false if StatusLabel and StatusLabel.Parent then StatusLabel.Text=string.format("🟢 Script Ativo | Frutas Coletadas: %d",fruitsCollectedThisSession)end return end
             isCollecting=true
             local fruitPart=GetNearestFruit()if not fruitPart then isCollecting=false return end
             local c=Player.Character local hrp=c and c:FindFirstChild("HumanoidRootPart")if not hrp then isCollecting=false return end
-            local dist=(hrp.Position-fruitPart.Position).Magnitude local dur=dist/250
+            
+            -- Anti-colisão total
+            for _,part in pairs(c:GetDescendants())do
+                if part:IsA("BasePart")then
+                    part.CanCollide=false
+                end
+            end
+            
+            local dist=(hrp.Position-fruitPart.Position).Magnitude local dur=dist/350
             activeTween=TweenService:Create(hrp,TweenInfo.new(dur,Enum.EasingStyle.Linear),{CFrame=fruitPart.CFrame})activeTween:Play()
-            heartbeatConn=RunService.Heartbeat:Connect(function()if not fruitPart or not fruitPart.Parent or not getgenv().ACF then StopTween()return end hrp.Velocity=Vector3.new(0,0,0)end)
+            heartbeatConn=RunService.Heartbeat:Connect(function()
+                if not fruitPart or not fruitPart.Parent or not getgenv().ACF then StopTween()return end
+                hrp.Velocity=Vector3.new(0,0,0)
+                hrp.AssemblyLinearVelocity=Vector3.new(0,0,0)
+            end)
             activeTween.Completed:Wait()task.wait(0.2)StopTween()
             local fruitName=fruitPart.Parent and fruitPart.Parent.Name or"Unknown"local maxWait,waited,collected=3,0,false
             while waited<maxWait and fruitPart and fruitPart.Parent do task.wait(0.1)waited=waited+0.1 if HasFruit()or not fruitPart.Parent then collected=true break end end
